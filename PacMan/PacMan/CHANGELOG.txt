@@ -1,0 +1,4 @@
+4/3/24 - v0.18
+- Added shooting projectiles
+5/3/24 v0.19
+- Added gun animations

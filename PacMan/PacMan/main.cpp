@@ -21,7 +21,7 @@
 //*********************************************************************************************************************
 const int res_X = 240; //resolution x
 const int res_Y = 120; //resolution y; right-click on the window title, select properties and set the proper size
-const int fov = 600; //field of view, in 0.1 degree increments (60 degrees)
+int fov = 600; //field of view, in 0.1 degree increments (60 degrees)
 
 //*********************************************************************************************************************
 // 										Math, lokup tables
@@ -30,7 +30,7 @@ const double torad = M_PI / 180; //degrees to radians conversion factor
 const double todeg = 180 / M_PI; //radians to degrees conversion factor
 double sintab[3600]; //lookup table of sine values, every 0.1 degree
 double fisheye[res_X]; //lookup table for fisheye correction, 1 value for every screen column
-
+double gausstab[8 * res_X]; //lookup table for gaussian function, centered at 0, for flashlight; 8 for margin
 //*********************************************************************************************************************
 // 										Input\output & system stuff
 //*********************************************************************************************************************
@@ -41,7 +41,7 @@ int tt1, tt2; //for calculating fps
 int debug[16]; //various flags/values for testing stuff
 
 //controls
-const Uint8 * keys = SDL_GetKeyboardState(NULL);
+const Uint8* keys = SDL_GetKeyboardState(NULL);
 int mousex, mousey, mousex0, mousey0;
 
 //*********************************************************************************************************************
@@ -65,7 +65,7 @@ double depth_map[res_X * res_Y]; //screen sized depth map to determine when to d
 //*********************************************************************************************************************
 // 										Textures, graphics
 //*********************************************************************************************************************
-int textures[32 * 32 * 16]; //1-D array containing 16 32x32 textures (1024 pixels); 
+int textures[32 * 32 * 64]; //1-D array containing 16 32x32 textures (1024 pixels); 
 //first byte is character, second one is color, 3rd is surface normal, 4th unused yet
 
 int sky[res_X * 2 * res_Y]; //sky texture
@@ -89,9 +89,12 @@ int map[map_size][map_size]; //world map
 
 //pathfinding map
 int path_map[map_size][map_size];
-
+int numd = 0; //door number
 //global time
 int g_time;
+
+double map_decors[256][8]; //enabled,x,y,z,sprite #, sprite #2, breakable, collision size
+double maprandoms[16]; //random values for map effects
 
 //Structure holding player data
 struct {
@@ -101,7 +104,7 @@ struct {
     double friction = 0.1; //friction coefficient for movement; set to 0.01 and go ice skating :)
     double accel = 0.01; //acceleration coefficient for movement
     double grav = 0.01; //gravity
-    double jump_h = 0.18; //jump height (initial velocity)
+    double jump_h = 0.2; //jump height (initial velocity)
     double hp = 100; //hitpoints
     double stamina = 100; //running stamina
     double battery = 1; //flashlight battery
@@ -156,6 +159,12 @@ double light_tmp[map_size * 16][map_size * 16]; //secondary helper buffer for li
 double static_lights[64][4]; //64 lights; x,y,strength,height; for calculating lightmap
 
 //*********************************************************************************************************************
+// 										Game State
+//*********************************************************************************************************************
+
+int state = 0; // 0 = menu; 1 = game;
+
+//*********************************************************************************************************************
 // 										Various helper functions
 //*********************************************************************************************************************
 
@@ -169,8 +178,8 @@ int checkray(double x1, double y1, double x2, double y2, int steps) {
     for (int i = 0; i < steps; i++) {
         x1 = x1 + dx;
         y1 = y1 + dy;
-        mcx = (int) x1;
-        mcy = (int) y1;
+        mcx = (int)x1;
+        mcy = (int)y1;
         if ((mcx > 0) && (mcy > 0) && (mcx < map_size) && (mcy < map_size))
             if ((map[mcx][mcy] % 256) > 0) {
                 k = 0;
@@ -202,16 +211,19 @@ void show_map() //just show the map on the screen, good for debugging map genera
 }
 
 //**********************************************************************************************************************
-void map_row(const char * str, int row) //reads a string and generates a map row from it; 'a'=wall type 1, 'b' = 2 etc.
+void map_row(const char* str, int row) //reads a string and generates a map row from it; 'a'=wall type 1, 'b' = 2 etc.
 {
     int i = 0;
     char c;
     while (str[i]) {
         c = str[i];
         if (c == ' ') map[i][row] = 0 + 1 * 256 + 3 * 65536;
-        if (c == 'a') map[i][row] = 1 + 1 * 256 + 3 * 65536;
-        if (c == 'b') map[i][row] = 2 + 1 * 256 + 3 * 65536;
-        if (c == '_') map[i][row] = 0 + 4 * 256;
+        else if (c == 'a') map[i][row] = 1 + 1 * 256 + 3 * 65536;
+        else if (c == 'b') map[i][row] = 2 + 1 * 256 + 3 * 65536;
+        else if (c == '1') { map[i][row] = 200 + 256 * 1 + 65536 * 1 + numd * 16777216; mapanims[numd][0] = 1; numd++; }
+        else if (c == '2') { map[i][row] = 201 + 256 * 1 + 65536 * 1 + numd * 16777216; mapanims[numd][0] = 1; numd++; }
+        else if (c == '8') { map[i][row] = 202 + 256 * 1 + 65536 * 1 + numd * 16777216; mapanims[numd][0] = 1; numd++; }
+        else if (c == '_') map[i][row] = 0 + 4 * 256;
         i++;
     };
 }
@@ -238,6 +250,18 @@ void gen_texture(int number, int type, int p1, int p2, int p3, int p4, int p5, i
             for (int y = 0; y < 32; y++) {
                 textures[x + y * 32 + 1024 * number] = p1 - p2 * ((y % 31 == 0) || ((x + 4 * (y / 31)) % 16 == 0)) + rand() % 2 + p3 * 256;
                 textures[x + y * 32 + 1024 * number] += 65536 * (128 + rand() % 32 - 16); //surface normal - random roughness
+            }
+    }
+    if (type == 2) //large, monocolored bricks/plates; p1=brick brightness, p2=mortar brightness, p3=color
+    {
+        for (int x = 0; x < 32; x++) //texture generation
+            for (int y = 0; y < 32; y++) {
+                int ins = ((x > 4) && (x < 27) && (y > 5) && (y < 26)); //inside square
+
+                textures[x + y * 32 + 1024 * number] = (12 + rand() % 5) + (7 + ins - 2 * ((x > 5) && (x < 8) && (y == 16))) * 256; //Door
+                textures[x + y * 32 + 1024 * number] += 65536 * (128 - 96 * ins * (x == 5) + 96 * ins * (x == 26)); //normal map
+                //textures[x + y * 32 + 1024 * number] = x ^ y;
+                //textures[x + y * 32 + 1024 * number] += 65536 * (128 + rand() % 32 - 16); //surface normal - random roughness
             }
     }
 
@@ -283,7 +307,7 @@ void gen_sky(int brightness) {
 // 										Pac-man map
 //*********************************************************************************************************************
 
-std::vector < std::string > loadPacMap(const std::string & filename) {
+std::vector < std::string > loadPacMap(const std::string& filename) {
     std::vector < std::string > mapData;
     std::ifstream file(filename);
 
@@ -295,7 +319,8 @@ std::vector < std::string > loadPacMap(const std::string & filename) {
         }
 
         file.close();
-    } else {
+    }
+    else {
         std::cerr << "Unable to open file: " << filename << std::endl;
     }
 
@@ -305,21 +330,22 @@ std::vector < std::string > loadPacMap(const std::string & filename) {
 void loadMap(std::string path) {
     std::vector < std::string > map = loadPacMap(path);
     int x = 0;
-    for (const std::string s: map) {
+    for (const std::string s : map) {
         map_row(s.c_str(), x);
         x++;
     }
 }
 
-void listFilesWithExtension(const std::string & path,
-    const std::string & extension) {
+void listFilesWithExtension(const std::string& path,
+    const std::string& extension) {
     try {
-        for (const auto & entry: std::filesystem::directory_iterator(path)) {
+        for (const auto& entry : std::filesystem::directory_iterator(path)) {
             if (std::filesystem::is_regular_file(entry.path()) && entry.path().extension() == extension) {
                 std::cout << entry.path().filename() << std::endl;
             }
         }
-    } catch (const std::filesystem::filesystem_error & e) {
+    }
+    catch (const std::filesystem::filesystem_error& e) {
         std::cerr << "Error accessing the directory: " << e.what() << std::endl;
     }
 }
@@ -339,6 +365,7 @@ void gen_map_pacman(std::string path) {
     gen_texture(2, 1, 8, 4, 8, 0, 0, 0); //gray plates
     gen_texture(3, 1, 8, 6, 5, 0, 0, 0); //magenta plates
     gen_texture(4, 1, 12, 0, 2, 0, 0, 0); //green grass
+    gen_texture(63, 2, 12, 0, 2, 0, 0, 0); //green grass
 
     for (int x = 0; x < map_size; x++)
         for (int y = 0; y < map_size; y++)
@@ -424,7 +451,7 @@ void gen_map_pacman(std::string path) {
 
 
 //*********************************************************************************************************************
-// 										Initialization - Sprites
+// 										Initialization - Loading Files
 //*********************************************************************************************************************
 
 void loadsprites()
@@ -540,15 +567,15 @@ void calculate_lights() {
             if (fabs(x / 16 - static_lights[i][0]) < 12) //light closer than 12 squares?
                 for (int y = 1; y < map_size * 16; y++) //go through whole lightmap, y coord.
                     if (fabs(y / 16 - static_lights[i][1]) < 12) //light closer than 12 squares?
-    {
-        cx = 1.0 / 16.0 * x; //map coordinate x
-        cy = 1.0 / 16.0 * y; //map coordinate y
+                    {
+                        cx = 1.0 / 16.0 * x; //map coordinate x
+                        cy = 1.0 / 16.0 * y; //map coordinate y
 
-        double dst = (cx - static_lights[i][0]) * (cx - static_lights[i][0]) + (cy - static_lights[i][1]) * (cy - static_lights[i][1]); //distance to light
-        if (dst < 144) k = checkray(cx, cy, static_lights[i][0], static_lights[i][1], 256);
-        else k = 0; //check if there is unobstructed line to the light
-        lightmap[x][y] += 1.0 * k * static_lights[i][2] / sqrt(dst); //update lightmap
-    }
+                        double dst = (cx - static_lights[i][0]) * (cx - static_lights[i][0]) + (cy - static_lights[i][1]) * (cy - static_lights[i][1]); //distance to light
+                        if (dst < 144) k = checkray(cx, cy, static_lights[i][0], static_lights[i][1], 256);
+                        else k = 0; //check if there is unobstructed line to the light
+                        lightmap[x][y] += 1.0 * k * static_lights[i][2] / sqrt(dst); //update lightmap
+                    }
 
     for (int x = 1; x < map_size * 16 - 1; x++) //apply sky
         for (int y = 1; y < map_size * 16 - 1; y++)
@@ -585,6 +612,9 @@ void init_math() //initialization, precalculation
 
     //fisheye correction term (cosine of ray angle relative to the screen center, e.g. res_X/2)
     for (int i = 0; i < res_X; i++) fisheye[i] = cos(0.1 * (i - res_X / 2) * torad * fov / res_X);
+
+    for (int i = 0; i < 8 * res_X; i++) gausstab[i] = exp(-1.0 * ((5.0 * i / res_X) * (5.0 * i / res_X))); //gaussian, 5 sigma width
+    
 }
 
 //*********************************************************************************************************************
@@ -594,7 +624,8 @@ void init_math() //initialization, precalculation
 void cast() //main ray casting function
 {
     //some speedup might be possible by declaring all variables beforehand here instead of inside the loops
-
+    long doornum;
+    int dr;
     for (int xs = 0; xs < res_X; xs++) //go through all screen columns
     {
         //ray angle = player angle +-half of FoV at screen edges; 
@@ -616,15 +647,15 @@ void cast() //main ray casting function
         //ray starts from player position; tracing is done on doubles (x,y), map checks on integers(ix,iy)
         double r_x = player.x;
         double r_y = player.y;
-        int r_ix = (int) r_x;
-        int r_iy = (int) r_y;
+        int r_ix = (int)r_x;
+        int r_iy = (int)r_y;
         double r_dist = 0; //travelled distance
         double t1, t2; //time to intersect next vertical/horizontal grid line;
         double h_clamp; //clamped height - for brightness (so walls do not turn extremely bright when very close)
 
         //ray tracing; we check only intersections with horizontal/vertical grid lines, so maximum of 2*map_size is possible
         for (int i = 0; i < 2 * (map_size - 1); i++) {
-            if ((map[r_ix][r_iy] % 256) > 0) break; //map>0 is a wall; hit a wall? end tracing
+            if ((map[r_ix][r_iy] % 256 > 0) && (map[r_ix][r_iy] % 256 < 200)) break; //map>0 is a wall; hit a wall? end tracing 200=horizontal door
 
             //calculate time to intersect next vertical grid line; 
             //distance to travel is the difference between double and int coordinate, +1 if moving to the right 
@@ -634,17 +665,43 @@ void cast() //main ray casting function
             //the same for horizontal lines
             t2 = (r_iy - r_y + (r_vy > 0)) / r_vy;
 
+            dr = 0;
+
+            if (map[r_ix][r_iy] % 256 == 202) {
+                typemap[xs] = 63;
+                t2 = t2 / 2.0;
+                t1 = t1 / 2.0;
+            }
+
+            if ((map[r_ix][r_iy] % 256 == 200)) {
+                t2 = t2 / 2.0;
+                if (t1 > t2) dr = 1;
+                doornum = map[r_ix][r_iy] >> 24;
+            } //special case-horizontal door
+            if ((map[r_ix][r_iy] % 256 == 201)) {
+                t1 = t1 / 2.0;
+                if (t1 < t2) dr = 1;
+                doornum = map[r_ix][r_iy] >> 24;
+            } //special case-vertical door
+
             //now we select the lower of two times, e.g. the closest intersection
             if (t1 < t2) { //intersection with vertical line
                 r_y += r_vy * t1; //update y position
                 r_ix += r_ivx; //update x map position by +-1
                 r_x = r_ix - (r_vx < 0) * r_ivx; //we are on vertical line -> x coordinate = integer coordinate
                 r_dist += t1; //increment distance by velocity (=1) * time
-            } else { //intersection with horizontal line
+            }
+            else { //intersection with horizontal line
                 r_x += r_vx * t2;
                 r_iy += r_ivy;
                 r_y = r_iy - (r_vy < 0) * r_ivy;
                 r_dist += t2;
+            }
+
+            if (dr == 1) //door visibility check to stop the tracing
+            {
+                tmap[xs] = (t1 < t2) ? 32 * fabs(r_y - (int)(r_y)) : 32 * fabs(r_x - (int)(r_x)); //calculate texture coordinate - needed for partially open door
+                if (tmap[xs] > (mapanims[doornum][1] - 1)) break; //4th map byte = door animation index (map[mx][my]/16777216)
             }
         }
         //end of tracing; the distance is updated during steps, so there is no need to calculate it
@@ -660,6 +717,10 @@ void cast() //main ray casting function
         wallxmap[xs] = r_x; //record final ray position
         wallymap[xs] = r_y;
         walldmap[xs] = r_dist;
+        if (dr == 1) {
+            typemap[xs] = 63;
+            tmap[xs] = (t1 < t2) ? (int)(32 + 32 * fabs(r_y - (int)(r_y)) - mapanims[doornum][1]) % 32 : (int)(32 + 32 * fabs(r_x - (int)(r_x)) - mapanims[doornum][1]) % 32;
+        } //door - last texture no 63
     }
 }
 
@@ -722,6 +783,18 @@ void draw_projectiles()
 
 
 void draw() {
+    //int off; //offset in the 1-d char/color buffer we are writing to 
+    int lm1, lm2, ang; //upper/lower limit of the wall slice; ray angle
+    int crdx, crdy, crd, mcx, mcy; //texture x,y coordinate, final coordinate in 1-d texture buffer, max x,y coordinate of floor/ceiling pixel
+    double cha, col, norm; //character,color,normal map pixel to draw; use double for smooth distance falloff etc.
+    double dx, dy, dz; //ray steps for floor rendering; dz=distance to floor;
+    int lcx, lcy, lcrd; //light coordinate for invdist matrix
+    int hcap; //wall height with upper cap; for brightness calc.
+    double bmpc[2]; //for bump mapping
+    double fbump; //for floor/ceiling bump mapping
+    double plusrefl;
+
+    double anim_phase = (0.5 + 0.5 * sin(1.0 * g_time / 100.0));
     //go through the screen, column by column
     for (int x = 0; x < res_X; x++) {
         int plusy = (int)(-player.z * (hmap[x] + 1)); //player vertical pos modifier
@@ -736,11 +809,11 @@ void draw() {
         int color; //the color of the character to draw
         double normal; //texture normal
         int iswall; //on/off flag if we are drawing a wall. Needed for depth map
-
+        double bmpc[2]; //for bump mapping
         int r_angle = (int)(3600 + player.ang_h + (x - res_X / 2) * fov / res_X); //ray angle, needed for normal maps
         double r_vx = sintab[(r_angle + 900) % 3600]; //ray step x
         double r_vy = sintab[r_angle % 3600]; //ray step y
-
+        double anim_phase = (0.5 + 0.5 * sin(1.0 * g_time / 100.0));
         for (int y = -res_Y / 2; y < res_Y / 2; y++) //go along the whole screen column, drawing either wall or floor/ceiling
         {
             int ang = (int)(3600 + player.ang_h + (x - res_X / 2) * fov / res_X); //calculate ray angle; needed for floor
@@ -762,11 +835,12 @@ void draw() {
                 character += lightmap[(int)(16 * wallxmap[x])][(int)(16 * wallymap[x])]; //apply 2-D lightmap
                 character += player.battery * light_flashlight * flashlight_coeff[x + (y + res_Y / 2) * res_X] * hmap[x] / res_Y * lmap[x]; //flashlight
                 character *= (nmap[x] * (fabs(r_vx) + r_vy * normal) + (1 - nmap[x]) * (fabs(r_vy) + r_vx * normal)); //apply texture normals
-            } else //floor/ceiling?
+            }
+            else //floor/ceiling?
             {
                 iswall = 0;
                 double plusy2;
-                (y + horizon_pos > 0) ? plusy2 = 32.0 * player.z: plusy2 = -32.0 * player.z; //player height modif.
+                (y + horizon_pos > 0) ? plusy2 = 32.0 * player.z : plusy2 = -32.0 * player.z; //player height modif.
                 //calculate distance to the floor pixel; y and horizon_pos are in pixels, 0.1 is added here to avoid division by 0
                 double dz = (res_Y / 2 + plusy2) / (fabs(y + horizon_pos) + 0.0) / fisheye[x];
                 if ((dz < 16) && (dz > 0)) //ignore extremely far things
@@ -779,6 +853,17 @@ void draw() {
                     if (y > (-horizon_pos)) crd += 1024 * ((map[mcx][mcy] / 256) % 256); //2nd byte = floor type
                     else crd += 1024 * ((map[mcx][mcy] / 65536) % 256); //3rd byte = ceiling type
 
+                    /*
+                    //special case-water
+                    if ((y > -horizon_pos) && (((map[mcx][mcy] / 256) % 256) == 3)) cha = anim_phase * (textures[crd] % 256) + (1 - anim_phase) * (textures[crd + 1024] % 256);
+                    bmpc[g_time % 2] = character;
+                    color = (textures[crd] / 256) % 256; //get texture color (2nd byte)
+                    character = character * 1.0 / (0.1 + 16.0 * dz); //OPTIONAL distance based brightness; change factor 2.5 for faster/slower faloff; factor 0.1 is to avoid division by 0 if dz=0
+                    if (light_flashlight > 0) character = character * (1 + 6.0 * gausstab[abs(x - res_X / 2)] * gausstab[abs(2 * y - 2 * horizon_pos)]); //flashlight
+                    */
+                    //static lights
+                    //cha = cha + lightmap[(int)(16 * (player.x + dx * dz))][(int)(16 * (player.y + dy * dz))] * (1.0 + 0.01 * maprandoms[0]);
+
                     if (((map[mcx][mcy] / 65536) > 0) || (y > (-horizon_pos))) //ground or non-sky?
                     {
                         character = textures[crd] % 256; //get texture pixel (1st byte)
@@ -787,7 +872,8 @@ void draw() {
                         character *= 0.2 * light_global * (light_faloff * abs(y + horizon_pos) / (dz + 1) + 1 - light_faloff); //distance-based gradient
                         //character+=lightmap[(int)(16*(player.x+dx*dz))][(int)(16*(player.y+dy*dz))]; //apply 2-D lightmap
                         character += 0.2 * (player.battery * light_flashlight * flashlight_coeff[x + (y + res_Y / 2) * res_X] / (dz + 2)); //flashlight
-                    } else {
+                    }
+                    else {
                         character = sky[(res_X * 2 * res_Y + x / 8 + (int)(r_angle / 8) + (y + res_Y / 2 + horizon_pos) * 2 * res_X) % (res_X * res_Y)];
                         character += ((abs(y) % 2) + (abs(x) % 2)); //add dithering 
                         color = sky_color;
@@ -797,8 +883,8 @@ void draw() {
             //limit the value to the limits of character gradient (especially important if there are multiple brightness modifiers)
             if (character > grad_length) character = grad_length;
             if ((character < 0) || std::isnan(character)) character = 0;
-            char_buff[offset] = char_grad[(int) character]; //save the character in character buffer
-            nchar_buff[offset] = (int) character; //save the character number (basically brightness) in character number buffer
+            char_buff[offset] = char_grad[(int)character]; //save the character in character buffer
+            nchar_buff[offset] = (int)character; //save the character number (basically brightness) in character number buffer
             color_buff[offset] = pal[color][(character > 30) + (character > 85)]; //save the color in color buffer
             iswall ? depth_map[offset] = walldmap[x] : depth_map[offset] = 255; //record depth map
             offset += res_X; //go down by 1 row
@@ -807,15 +893,27 @@ void draw() {
 }
 
 //*********************************************************************************************************************
-void draw_sprite(int pos, int number) //draw a sprite at specific point in char buffer - will be used for interface, weapon etc.
+void draw_sprite(int pos, int number, int which) //draw a sprite at specific point in char buffer - will be used for interface, weapon etc.
 {
-    for (int x = 0; x < 32; x++)
-        for (int y = 0; y < 32; y++)
-            if (sprites[x + y * 32 + 1024 * number] / 65536) //alpha>0?
-    {
-        char_buff[pos + x + res_X * y] = char_grad[sprites[x + y * 32] % grad_length];
-        nchar_buff[pos + x + res_X * y] = sprites[x + y * 32] % grad_length;
-        color_buff[pos + x + res_X * y] = (sprites[x + y * 32] / 256) % 256;
+    if (which == 0) {
+        for (int x = 0; x < 32; x++)
+            for (int y = 0; y < 32; y++)
+                if (sprites[x + y * 32 + 1024 * number] / 65536) //alpha>0?
+                {
+                    char_buff[pos + x + res_X * y] = char_grad[sprites[x + y * 32] % grad_length];
+                    nchar_buff[pos + x + res_X * y] = sprites[x + y * 32] % grad_length;
+                    color_buff[pos + x + res_X * y] = (sprites[x + y * 32] / 256) % 256;
+                }
+    }
+    else {
+        for (int x = 0; x < 32; x++)
+            for (int y = 0; y < 32; y++)
+                if (sprites2[x + y * 32 + 1024 * number] / 65536) //alpha>0?
+                {
+                    char_buff[pos + x + res_X * y] = char_grad[sprites2[x + y * 32] % grad_length];
+                    nchar_buff[pos + x + res_X * y] = sprites2[x + y * 32] % grad_length;
+                    color_buff[pos + x + res_X * y] = (sprites2[x + y * 32] / 256) % 256;
+                }
     }
 }
 
@@ -899,7 +997,7 @@ void HUD() {
 //*********************************************************************************************************************
 void post_processing() {
     if (player.status[0] > 0) //player is hurt?
-        for (int i = 0; i < res_X * res_Y; i++) color_buff[i] = 4; //loop through all pixels and set them to red
+        for (int i = 0; i < res_X * res_Y; i++) color_buff[i] = 4; //loop through all pixels and set them to 
 }
 
 //*********************************************************************************************************************
@@ -910,8 +1008,8 @@ void controls() //handles keyboard, mouse controls and player movement; windows-
     SDL_PumpEvents();
     int interx, intery; //map coordinate player is interacting with
     double accel = player.accel * (1.0 / 150 * player.stamina);
-    double dx = accel * sintab[(int) player.ang_h % 3600]; //x step in the direction player is looking; 
-    double dy = accel * sintab[((int) player.ang_h + 900) % 3600]; //y step in the direction player is looking
+    double dx = accel * sintab[(int)player.ang_h % 3600]; //x step in the direction player is looking; 
+    double dy = accel * sintab[((int)player.ang_h + 900) % 3600]; //y step in the direction player is looking
 
     if (player.hp >= 0.5) {
         if (keys[SDL_SCANCODE_A]) {
@@ -945,8 +1043,8 @@ void controls() //handles keyboard, mouse controls and player movement; windows-
             player.vz = player.jump_h;
         }; //space for jump
         if (keys[SDL_SCANCODE_E] && (key_delay < 0.1)) {//use key
-            interx = (int)(player.x + 300 * dy);
-            intery = (int)(player.y + 300 * dx);
+            interx = (int)(player.x + 150 * dy);
+            intery = (int)(player.y + 150 * dx);
 
             int dooraction;
             long doornum = map[interx][intery] >> 24;
@@ -955,6 +1053,7 @@ void controls() //handles keyboard, mouse controls and player movement; windows-
             {
                 dooraction = mapanims[doornum][0];
                 mapanims[doornum][0] = -dooraction; //1=opening, -1=closing
+                //std::cout << "Interact\n";
             }
 
             if (map[interx][intery] % 256 == 201)//vertical door
@@ -962,14 +1061,13 @@ void controls() //handles keyboard, mouse controls and player movement; windows-
                 dooraction = mapanims[doornum][0];
                 mapanims[doornum][0] = -dooraction; //1=opening, -1=closing
             }
-
             key_delay = 1;
         }//end use key
     }
 
     if (keys[SDL_SCANCODE_ESCAPE]) F_exit = 1; //esc for exit
 
-   if (keys[SDL_SCANCODE_H] && (key_delay < 0.1)) {
+    if (keys[SDL_SCANCODE_H] && (key_delay < 0.1)) {
         debug[0] = (debug[0] + 1) % 3;
         key_delay = 1;
     } //h for toggling display type
@@ -979,7 +1077,7 @@ void controls() //handles keyboard, mouse controls and player movement; windows-
     mousex0 = P_Res_X / 2;
     mousey0 = P_Res_Y / 2;
     Uint32 mbuttons;
-    mbuttons = SDL_GetMouseState( & mousex, & mousey);
+    mbuttons = SDL_GetMouseState(&mousex, &mousey);
     player.ang_h = 500.0 * (mousex - mousex0) / mouse_speed;
     player.ang_v = 20.0 * (mousey - mousey0) / mouse_speed;
 
@@ -988,7 +1086,7 @@ void controls() //handles keyboard, mouse controls and player movement; windows-
     player.status[2] += (int)(100.0 * spd); //walk cycle phase
     player.ang_v -= 5 * sin(0.01 * player.status[2]) * sin(0.01 * player.status[2]); //vertical movement when running
     if (player.hp > 0.5) player.ang_v += 0.1 / (50 * spd + 1) * (100 - player.stamina) * sin(0.05 * g_time); //vertical movement when standing tired
-    horizon_pos = (int) player.ang_v; //position of the horizon, for looking up/down 0=in the middle
+    horizon_pos = (int)player.ang_v; //position of the horizon, for looking up/down 0=in the middle
 
     if (player.ang_h < 3600) player.ang_h += 3600; //if player angle is less than 360 degrees, add 360 degrees so its never negative
 
@@ -996,14 +1094,14 @@ void controls() //handles keyboard, mouse controls and player movement; windows-
     {
         projectiles[num_projectile][0] = player.x;
         projectiles[num_projectile][1] = player.y;
-        projectiles[num_projectile][2] = 12 * dy;
-        projectiles[num_projectile][3] = 12 * dx;
+        projectiles[num_projectile][2] = 32 * dy;
+        projectiles[num_projectile][3] = 32 * dx;
         projectiles[num_projectile][4] = 1;
         projectiles[num_projectile][5] = 1;
         projectiles[num_projectile][6] = num_projectile % 8;
         num_projectile = (num_projectile + 1) % 64;
         key_delay = 1;
-        //player_anim[0] = 1;
+        player_anim[0] = 1;
     }
 }
 
@@ -1017,13 +1115,34 @@ void physics() {
     if (player.y > (map_size - 2)) player.y = map_size - 2;
     if (player.y < 2) player.y = 2;
 
+    if (g_time % 8 == 0)
+        for (int i = 0; i < 64; i++) //map animations
+        {
+            if ((mapanims[i][0] == 1) && (mapanims[i][1] > 0)) mapanims[i][1]--; //door opening
+            if ((mapanims[i][0] == -1) && (mapanims[i][1] < 32)) mapanims[i][1]++;
+        }
+
     if (player.vx > 0.1) player.vx = 0.1;
     if (player.vx < -0.1) player.vx = -0.1; //failsafes from exceeding certain speed limit
     if (player.vy > 0.1) player.vy = 0.1;
     if (player.vy < -0.1) player.vy = -0.1;
 
-    if (map[((int)(player.x + 1 * player.vx)) % map_size][((int) player.y) % map_size] % 256 > 0) player.vx = -player.vx / 2; //collisions in x axis - bounce back with half the velocity
-    if (map[((int) player.x) % map_size][((int)(player.y + 1 * player.vy)) % map_size] % 256 > 0) player.vy = -player.vy / 2; //collisions in y axis
+    int block, collision;
+    long int doornum;
+
+    block = map[(int)(player.x + 1 * player.vx)][(int)player.y];
+    doornum = block >> 24;
+    collision = (block % 256 > 0);
+    if ((block % 256 == 200) && (mapanims[doornum][0] == -1) && (mapanims[doornum][1] > 30)) collision = 0;
+    if ((block % 256 == 201) && (mapanims[doornum][0] == -1) && (mapanims[doornum][1] > 30)) collision = 0;
+    if (collision == 1) player.vx = -player.vx / 2; //collisions in x axis - bounce back with half the velocity
+
+    block = map[(int)player.x][(int)(player.y + 1 * player.vy)];
+    doornum = block >> 24;
+    collision = (block % 256 > 0);
+    if ((block % 256 == 200) && (mapanims[doornum][0] == -1) && (mapanims[doornum][1] > 30)) collision = 0;
+    if ((block % 256 == 201) && (mapanims[doornum][0] == -1) && (mapanims[doornum][1] > 30)) collision = 0;
+    if (collision == 1) player.vy = -player.vy / 2; //collisions in y axis
     player.x += player.vx; //update x,y values with x,y velocities
     player.y += player.vy;
     player.z += player.vz;
@@ -1031,39 +1150,13 @@ void physics() {
     player.vy *= (1 - player.friction);
     player.vz *= (1 - player.friction);
 
-    /* UNFINISHED
-    // Update Doors
-    int block, collision;
-    long int doornum;
-    if (g_time % 8 == 0) {
-        for (int i = 0; i < 64; i++) //map animations
-        {
-            if ((mapanims[i][0] == 1) && (mapanims[i][1] > 0))mapanims[i][1]--; //door opening
-            if ((mapanims[i][0] == -1) && (mapanims[i][1] < 32))mapanims[i][1]++;
-        }
-    }
-
-    block = map[(int)(player.x + 1 * player.vx)][(int)player.y];
-    doornum = block >> 24;
-    collision = (block % 256 > 0);
-    if ((block % 256 == 200) && (mapanims[doornum][0] == -1) && (mapanims[doornum][1] > 30))collision = 0;
-    if ((block % 256 == 201) && (mapanims[doornum][0] == -1) && (mapanims[doornum][1] > 30))collision = 0;
-    if (collision == 1)player.vx = -player.vx / 2;//collisions in x axis - bounce back with half the velocity
-
-    block = map[(int)player.x][(int)(player[1] + 1 * player[3])];
-    doornum = block >> 24;
-    collision = (block % 256 > 0);
-    if ((block % 256 == 200) && (mapanims[doornum][0] == -1) && (mapanims[doornum][1] > 30))collision = 0;
-    if ((block % 256 == 201) && (mapanims[doornum][0] == -1) && (mapanims[doornum][1] > 30))collision = 0;
-    if (collision == 1)player[3] = -player[3] / 2;//collisions in y axis
-    */
     // Update projectiles
     for (int i = 0; i < 64; i++)if (projectiles[i][4] > 0)
     {
         projectiles[i][0] += projectiles[i][2];
         projectiles[i][1] += projectiles[i][3];
 
-        if (map[(int)(projectiles[i][0])][(int)(projectiles[i][1])] % 256 > 0) { projectiles[i][4] = 0;}
+        if (map[(int)(projectiles[i][0])][(int)(projectiles[i][1])] % 256 > 0) { projectiles[i][4] = 0; }
     }
 
     player.vz -= player.grav; //gravity
@@ -1084,6 +1177,7 @@ void physics() {
 
     if (light_flashlight) player.battery *= 0.9999; //slow decay
     if (player.hp >= 0.5) player.score += 0.1;
+    if (player_anim[0] > 0) player_anim[0] = ((int)player_anim[0] + 1) % (16 * 6); //weapon animation
 }
 
 //*********************************************************************************************************************
@@ -1099,26 +1193,26 @@ void move_enemies() {
         for (int y = 1; y < map_size - 1; y++)
             path_map[x][y] = 0; //clear path map
 
-    path_map[(int) player.x][(int) player.y] = map_size; //we set the tile occupied by the player to highest value
+    path_map[(int)player.x][(int)player.y] = map_size; //we set the tile occupied by the player to highest value
 
     for (int i = map_size; i > 0; i--)
         for (int x = 1; x < map_size - 1; x++)
             for (int y = 1; y < map_size - 1; y++)
                 if (path_map[x][y] == i) //the tile has value i?
-    {
-        if ((path_map[x + 1][y] == 0) && (map[x + 1][y] % 256 == 0)) path_map[x + 1][y] = i - 1; //set empty neighbouring tiles to (i-1)
-        if ((path_map[x - 1][y] == 0) && (map[x - 1][y] % 256 == 0)) path_map[x - 1][y] = i - 1;
-        if ((path_map[x][y + 1] == 0) && (map[x][y + 1] % 256 == 0)) path_map[x][y + 1] = i - 1;
-        if ((path_map[x][y - 1] == 0) && (map[x][y - 1] % 256 == 0)) path_map[x][y - 1] = i - 1;
-    }
+                {
+                    if ((path_map[x + 1][y] == 0) && (map[x + 1][y] % 256 == 0)) path_map[x + 1][y] = i - 1; //set empty neighbouring tiles to (i-1)
+                    if ((path_map[x - 1][y] == 0) && (map[x - 1][y] % 256 == 0)) path_map[x - 1][y] = i - 1;
+                    if ((path_map[x][y + 1] == 0) && (map[x][y + 1] % 256 == 0)) path_map[x][y + 1] = i - 1;
+                    if ((path_map[x][y - 1] == 0) && (map[x][y - 1] % 256 == 0)) path_map[x][y - 1] = i - 1;
+                }
     //after this step, enemies just need to go towards highest nearby number to get to the player
 
     for (int i = 0; i < 16; i++)
         if (enemies[i].enabled == 1) {
             nx = enemies[i].x + 8 * enemies[i].vx;
             ny = enemies[i].y + 8 * enemies[i].vy;
-            if (map[(int) nx][(int) enemies[i].y] % 256 > 0) enemies[i].vx = -enemies[i].vx; //map collisions
-            if (map[(int) enemies[i].x][(int) ny] % 256 > 0) enemies[i].vy = -enemies[i].vy;
+            if (map[(int)nx][(int)enemies[i].y] % 256 > 0) enemies[i].vx = -enemies[i].vx; //map collisions
+            if (map[(int)enemies[i].x][(int)ny] % 256 > 0) enemies[i].vy = -enemies[i].vy;
 
             enemies[i].x += enemies[i].vx; //movement
             enemies[i].y += enemies[i].vy;
@@ -1132,13 +1226,13 @@ void move_enemies() {
             {
                 nx = enemies[i].x + 1.4 * cos(dir * M_PI / 4);
                 ny = enemies[i].y + 1.4 * sin(dir * M_PI / 4);
-                rating = path_map[((int) nx) % map_size][((int) ny) % map_size];
+                rating = path_map[((int)nx) % map_size][((int)ny) % map_size];
                 //AI quirks of various ghosts
                 if (rand() % 8 == 0) rating += rand() % 3; //sometimes add some randomness
 
                 //map tile is floor and has higher rating? record it
-                if ((map[((int) nx) % map_size][((int) ny) % map_size] % 256 == 0) && (rating > maxrating)) {
-                    maxrating = path_map[((int) nx) % map_size][((int) ny) % map_size];
+                if ((map[((int)nx) % map_size][((int)ny) % map_size] % 256 == 0) && (rating > maxrating)) {
+                    maxrating = path_map[((int)nx) % map_size][((int)ny) % map_size];
                     chosen = dir;
                 }
             }
@@ -1187,17 +1281,17 @@ void minimap(int type) {
                 color_buff[x + y * res_X] = 8 * (map[x][y] % 256 > 0);
             }
 
-        color_buff[(int) player.x + (int) player.y * res_X] = 15; //highlight player
-        char_buff[(int) player.x + (int) player.y * res_X] = '@';
+        color_buff[(int)player.x + (int)player.y * res_X] = 15; //highlight player
+        char_buff[(int)player.x + (int)player.y * res_X] = '@';
 
-        color_buff[(int) enemies[0].x + (int) enemies[0].y * res_X] = 12; //highlight enemies
-        char_buff[(int) enemies[0].x + (int) enemies[0].y * res_X] = '*';
-        color_buff[(int) enemies[1].x + (int) enemies[1].y * res_X] = 13;
-        char_buff[(int) enemies[1].x + (int) enemies[1].y * res_X] = '*';
-        color_buff[(int) enemies[2].x + (int) enemies[2].y * res_X] = 10;
-        char_buff[(int) enemies[2].x + (int) enemies[2].y * res_X] = '*';
-        color_buff[(int) enemies[3].x + (int) enemies[3].y * res_X] = 14;
-        char_buff[(int) enemies[3].x + (int) enemies[3].y * res_X] = '*';
+        color_buff[(int)enemies[0].x + (int)enemies[0].y * res_X] = 12; //highlight enemies
+        char_buff[(int)enemies[0].x + (int)enemies[0].y * res_X] = '*';
+        color_buff[(int)enemies[1].x + (int)enemies[1].y * res_X] = 13;
+        char_buff[(int)enemies[1].x + (int)enemies[1].y * res_X] = '*';
+        color_buff[(int)enemies[2].x + (int)enemies[2].y * res_X] = 10;
+        char_buff[(int)enemies[2].x + (int)enemies[2].y * res_X] = '*';
+        color_buff[(int)enemies[3].x + (int)enemies[3].y * res_X] = 14;
+        char_buff[(int)enemies[3].x + (int)enemies[3].y * res_X] = '*';
     }
 
     if (type == 1) //shows pathfinding map-for debug purposes
@@ -1208,11 +1302,11 @@ void minimap(int type) {
                 color_buff[x + y * res_X] = 7;
                 if (map[x][y] % 256 > 0) color_buff[x + y * res_X] = 0; //wall
             }
-        color_buff[(int) player.x + (int) player.y * res_X] = 10; //highlight player
-        color_buff[(int) enemies[0].x + (int) enemies[0].y * res_X] = 12; //highlight enemies
-        color_buff[(int) enemies[1].x + (int) enemies[1].y * res_X] = 13;
-        color_buff[(int) enemies[2].x + (int) enemies[2].y * res_X] = 10;
-        color_buff[(int) enemies[3].x + (int) enemies[3].y * res_X] = 14;
+        color_buff[(int)player.x + (int)player.y * res_X] = 10; //highlight player
+        color_buff[(int)enemies[0].x + (int)enemies[0].y * res_X] = 12; //highlight enemies
+        color_buff[(int)enemies[1].x + (int)enemies[1].y * res_X] = 13;
+        color_buff[(int)enemies[2].x + (int)enemies[2].y * res_X] = 10;
+        color_buff[(int)enemies[3].x + (int)enemies[3].y * res_X] = 14;
     }
 
 }
@@ -1222,53 +1316,93 @@ void minimap(int type) {
 //*********************************************************************************************************************
 
 int main() {
-	// Map loading
+    // Map loading
     std::string mapPath;
     std::cout << "Which map file do you choose (excluding extension)? Type 'D' for default: \n";
     std::cout << "List of maps: \n";
     listFilesWithExtension("maps", ".pac");
     std::cin >> mapPath;
 
-	// Setup
+    // Setup
     char str[10]; //for status display
     SDL_SetMainReady();
     init_math();
     set_palette();
     initwindow();
     loadsprites();
-
-    SDL_SetRelativeMouseMode(SDL_TRUE);
+    initImGui();
 
     gen_map_pacman(mapPath);
     gen_sky(10);
     calculate_lights();
     debug[0] = 1;
+    bool done = false;
+
     while (F_exit == 0) //main game loop
     {
-        controls();
-        physics();
-        move_enemies();
-        cast();
-        draw();
-        draw_enemies();
-        draw_projectiles();
-        minimap(0);
-        post_processing();
-        HUD();
 
-        g_time++;
-        if (g_time % 10 == 0) {
-            tt2 = tt1;
-            tt1 = SDL_GetTicks();
-            if (tt1 > tt2) fps = 10000 / (tt1 - tt2); //10k since we measure fps every 10 frames
+        if (state == 0) {
+
+            SDL_SetRelativeMouseMode(SDL_FALSE);
+            SDL_Event event;
+            while (SDL_PollEvent(&event))
+            {
+                ImGui_ImplSDL2_ProcessEvent(&event);
+                if (event.type == SDL_QUIT)
+                    done = true;
+                if (event.type == SDL_WINDOWEVENT && event.window.event == SDL_WINDOWEVENT_CLOSE && event.window.windowID == SDL_GetWindowID(screen))
+                    done = true;
+            }
+
+            ImGuiIO& io = ImGui::GetIO(); (void)io;
+            ImVec4 clear_color = ImVec4(0.45f, 0.55f, 0.60f, 1.00f);
+            ImGui_ImplSDLRenderer2_NewFrame();
+            ImGui_ImplSDL2_NewFrame();
+            ImGui::NewFrame();
+            auto displaySize = ImGui::GetIO().DisplaySize;
+            ImGui::SetNextWindowSize(ImVec2{ displaySize.x * 0.7f, displaySize.y * 0.5f }, ImGuiCond_Always);
+            // Centered
+            ImGui::SetNextWindowPos(ImVec2{ displaySize.x * 0.5f, displaySize.y * 0.5f }, ImGuiCond_Always, ImVec2{ 0.5f, 0.5f });
+            ImGui::Begin("Menu", nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse);
+            if (ImGui::Button("Start")) {
+                state = 1;
+            }
+            ImGui::Checkbox("Lighting", &settings::lighting);
+            ImGui::Render();
+            SDL_RenderSetScale(renderer, io.DisplayFramebufferScale.x, io.DisplayFramebufferScale.y);
+            //SDL_SetRenderDrawColor(renderer, (Uint8)(clear_color.x * 255), (Uint8)(clear_color.y * 255), (Uint8)(clear_color.z * 255), (Uint8)(clear_color.w * 255));
+            SDL_RenderClear(renderer);
+            ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData());
+            SDL_RenderPresent(renderer);
+            std::cout << "ImGui\n";
         }
+        if (state == 1) {
+            SDL_SetRelativeMouseMode(SDL_TRUE);
+            controls();
+            physics();
+            move_enemies();
+            cast();
+            draw();
+            draw_enemies();
+            draw_projectiles();
+            minimap(0);
+            post_processing();
+            HUD();
 
-        printf(str, "fps: %d hp: %d stamina: %d battery: %d score: %d", fps, (int) player.hp, (int) player.stamina, (int)(100 * player.battery), (int) player.score);
-        drawstring(0, 10, str);
-        drawstring(res_X * (res_Y - 1), 10, (char * )
-            "WASD to move, space to jump, F for flashlight");
-        display(debug[0]); //several types of display to choose
-        SDL_Delay(5);
+            g_time++;
+            if (g_time % 10 == 0) {
+                tt2 = tt1;
+                tt1 = SDL_GetTicks();
+                if (tt1 > tt2) fps = 10000 / (tt1 - tt2); //10k since we measure fps every 10 frames
+            }
+
+            //printf(str, "fps: %d hp: %d stamina: %d battery: %d score: %d", fps, (int)player.hp, (int)player.stamina, (int)(100 * player.battery), (int)player.score);
+            drawstring(0, 10, str);
+            drawstring(res_X * (res_Y - 1), 10, (char*)
+                "WASD to move, space to jump, F for flashlight");
+            display(debug[0]); //several types of display to choose
+            SDL_Delay(5);
+        }
     }
     //SDL_FreeCursor(cursor);
     cleanup();

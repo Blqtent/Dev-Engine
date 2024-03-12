@@ -1,7 +1,10 @@
 #pragma once
 #include <SDL2/SDL.h>
-
+#include <backends/imgui_impl_sdl2.h>
+#include <backends/imgui_impl_sdlrenderer2.h>
+#include <imgui.h>
 #include <math.h>
+#include "common.h"
  //*********************************************************************************************************************
 // 									 general constants/external variables
 //*********************************************************************************************************************
@@ -199,6 +202,23 @@ SDL_Texture * texture1; //font texture
 
 //----------------------------------------------------------------------Initialization functions
 
+void initImGui() {
+    // Setup Dear ImGui context
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGuiIO& io = ImGui::GetIO(); (void)io;
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;     // Enable Keyboard Controls
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;      // Enable Gamepad Controls
+
+    // Setup Dear ImGui style
+    ImGui::StyleColorsDark();
+    //ImGui::StyleColorsLight();
+
+    // Setup Platform/Renderer backends
+    ImGui_ImplSDL2_InitForSDLRenderer(screen, renderer);
+    ImGui_ImplSDLRenderer2_Init(renderer);
+}
+
 void initwindow() {
     screen = SDL_CreateWindow("My Game Window", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, P_Res_X, P_Res_Y, SDL_WINDOW_OPENGL);
     renderer = SDL_CreateRenderer(screen, -1, 0);
@@ -286,7 +306,6 @@ void display(int disp_mode) {
     double brightness;
 
     SDL_RenderClear(renderer);
-
     if (disp_mode == 0) //standard ASCII display
     {
         int lastcol = 0; //last used color
@@ -312,10 +331,11 @@ void display(int disp_mode) {
             g = pal2[lastcol][1];
             b = pal2[lastcol][2];
             brightness = 1.0 * sqrt(1.0 * nchar_buff[i] / grad_length);
-
-            r = (int)(1.0 * brightness * r);
-            g = (int)(1.0 * brightness * g);
-            b = (int)(1.0 * brightness * b);
+            if (settings::lighting) {
+                r = (int)(1.0 * brightness * r);
+                g = (int)(1.0 * brightness * g);
+                b = (int)(1.0 * brightness * b);
+            }
             settcolor(r, g, b);
             drawchar(i, (char) 219); //char 219=full block
         }
@@ -343,7 +363,9 @@ void display(int disp_mode) {
 }
 
 void cleanup() {
-
+    ImGui_ImplSDLRenderer2_Shutdown();
+    ImGui_ImplSDL2_Shutdown();
+    ImGui::DestroyContext();
     SDL_DestroyTexture(texture1);
     SDL_Quit();
 }
